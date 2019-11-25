@@ -179,3 +179,14 @@ func (rl *RateLimiter) Init() error {
 
 	return nil
 }
+
+// http handler to take care of too many api request.
+func (rl *RateLimiter) CreateMiddleWareHandler(w http.ResponseWriter, r *http.Request) {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if rl.IsOverLimit() {
+			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
