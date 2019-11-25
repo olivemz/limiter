@@ -63,7 +63,6 @@ func (rl *RateLimiter) updateLastWindowKey() {
 }
 
 
-
 // Stop terminates the ticker, and flushed the final count we had
 func (rl *RateLimiter) Stop() {
 	close(rl.stopTicker)
@@ -125,7 +124,7 @@ func (rl *RateLimiter) UpdateLastWindowCount() {
 // IsOverLimit checks if we are over the limit we have set
 func (rl *RateLimiter) IsOverLimit() bool {
 	if rl.lastWindowCount != nil {
-		lastWindowWeight := rl.getLastWindowWeight()
+		lastWindowWeight := rl.GetLastWindowWeight()
 		if rl.lastWindowCount * lastWindowWeight + rl.syncedCount+rl.currentCount > rl.Limit {
 			return true
 		}
@@ -141,7 +140,7 @@ func (rl *RateLimiter) IsOverLimit() bool {
 // now/seconds - math.Floor(now/seconds) will get the percentage of current window.
 // e.g. if interval is 60 secs, current time is 01:00:06, then current percentage shall be 10%
 // last window weight shall be 90%
-func (rl *RateLimiter) getLastWindowWeight float64 {
+func (rl *RateLimiter) GetLastWindowWeight float64 {
 	now := float64(time.Now().Unix())
 	seconds := rl.Interval.Seconds()
 	LastWindowWeight := 1- (now/seconds - math.Floor(now/seconds))
