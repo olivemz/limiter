@@ -125,16 +125,32 @@ func (rl *RateLimiter) UpdateLastWindowCount() {
 func (rl *RateLimiter) IsOverLimit() bool {
 	if rl.lastWindowCount != nil {
 		lastWindowWeight := rl.GetLastWindowWeight()
-		if rl.lastWindowCount * lastWindowWeight + rl.syncedCount+rl.currentCount > rl.Limit {
+		if float64(rl.lastWindowCount) * lastWindowWeight + rl.syncedCount+rl.currentCount > rl.Limit {
+			rl.UpdateRetryTime(rl.syncedCount+rl.currentCount , rl.lastWindowCount, lastWindowWeight )
 			return true
 		}
 	}
 	else {
 		if rl.syncedCount+rl.currentCount > rl.Limit {
+				rl.UpdateRetryTime(rl.syncedCount+rl.currentCount , 0 , 0.0)
 				return true
 			}
 	}
 	return false
+}
+
+// calculate the cooling off period.
+func (rl *RateLimiter) UpdateRetryTime( currentCount uint64 , lastWindowCount uint64, lastWindowWeight float64 ) {
+	interval := rl.Interval.Seconds();
+	var coolingOff uint64
+	if float64(currentCount) > rl.Limit {
+		coolingOff = uint64(interval)
+	} else if float64(currentCount) + float64(lastWindowCount) * lastWindowWeight > rl.Limit {
+		// use the percentage of required count from last window to calculate required time from last window.
+		coolingOffRatio := float64(rl.Limit) - float64(currentCount) / float64(lastWindowCount)
+		coolingOff := uint64(coolingOffRatio * interval)
+	}
+	atomic.SwapUint64(&rl.retryTime, coolingOff)
 }
 
 // now/seconds - math.Floor(now/seconds) will get the percentage of current window.
@@ -143,7 +159,7 @@ func (rl *RateLimiter) IsOverLimit() bool {
 func (rl *RateLimiter) GetLastWindowWeight() float64 {
 	now := float64(time.Now().Unix())
 	seconds := rl.Interval.Seconds()
-	LastWindowWeight := 1- (now/seconds - math.Floor(now/seconds))
+	LastWindowWeight := 1.0 - (now/seconds - math.Floor(now/seconds))
 	return LastWindowWeight
 }
 
@@ -181,9 +197,10 @@ func (rl *RateLimiter) Init() error {
 }
 
 // http handler to take care of too many api request.
-func (rl *RateLimiter) CreateMiddleWareHandler(w http.ResponseWriter, r *http.Request) {
+func (rl *RateLimiter) MiddleWareHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if rl.IsOverLimit() {
+			w.Write([]byte(fmt.Sprintf("Api call limit of %d per %d seconds reached, please wait for %d seconds" , rl.Limit, rl.Interval ,rl.retryTime)))
 			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
 			return
 		}
