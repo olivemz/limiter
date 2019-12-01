@@ -76,6 +76,7 @@ func (rl *RateLimiter) Increment() {
 	atomic.AddUint64(&rl.currentCount, 1)
 }
 
+// Flush update to redis s
 func (rl *RateLimiter) Flush() {
 	flushCount := atomic.SwapUint64(&rl.currentCount, 0)
 
@@ -90,7 +91,6 @@ func (rl *RateLimiter) Flush() {
 	redisConn.Send("MULTI")
 	redisConn.Send("INCRBY", rl.currentKey, flushCount)
 	redisConn.Send("EXPIRE", rl.currentKey, rl.Interval.Seconds()*2)
-
 	reply, redisErr := redis.Values(redisConn.Do("EXEC"))
 
 	if redisErr != nil {
@@ -105,58 +105,60 @@ func (rl *RateLimiter) Flush() {
 		log.Printf("Error reading new synced count: %v", scanErr)
 		return
 	}
-
 	rl.syncedCount = newSyncedCount
 }
 
-// Update last window count
+// UpdateLastWindowCount update last window count
 func (rl *RateLimiter) UpdateLastWindowCount() {
-	var lastWindowCount uint64
 	// send to redis, and get the updated value
 	redisConn := rl.RedisPool.Get()
-	reply, redisErr := redis.Values(redisConn.Do("GET", rl.lastKey))
-	// Only update last window count when last key exists and retrieve succeed
-	if redisErr == nil {
-		if _, scanErr := redis.Scan(reply, &lastWindowCount); scanErr != nil {
-			log.Printf("Error reading new synced count: %v", scanErr)
-			return
-		}
+	lastWindowCount, err := redis.Int(redisConn.Do("GET", rl.lastKey))
+	if err != nil {
+		log.Printf("Error reading new synced count: %v", err)
+		return
 	}
-	rl.lastWindowCount = lastWindowCount
+	if uint64(lastWindowCount) > rl.Limit {
+		rl.lastWindowCount = rl.Limit
+	} else {
+		rl.lastWindowCount = uint64(lastWindowCount)
+	}
 }
 
 // IsOverLimit checks if we are over the limit we have set
 func (rl *RateLimiter) IsOverLimit() bool {
+	var currentCount uint64
+	if currentCount = rl.syncedCount + rl.currentCount; currentCount > rl.Limit+1 {
+		currentCount = rl.Limit + 1
+	}
 	if rl.lastWindowCount != 0 {
 		lastWindowWeight := rl.GetLastWindowWeight()
-		if float64(rl.lastWindowCount)*lastWindowWeight+float64(rl.syncedCount+rl.currentCount) > float64(rl.Limit) {
-			rl.UpdateRetryTime(rl.syncedCount+rl.currentCount, rl.lastWindowCount, lastWindowWeight)
+		if float64(rl.lastWindowCount)*lastWindowWeight+float64(currentCount) > float64(rl.Limit) {
+			rl.UpdateRetryTime(currentCount, rl.lastWindowCount, lastWindowWeight)
 			return true
 		}
 	} else {
 		if rl.syncedCount+rl.currentCount > rl.Limit {
-			rl.UpdateRetryTime(rl.syncedCount+rl.currentCount, 0, 0.0)
+			rl.UpdateRetryTime(currentCount, 0, 0.0)
 			return true
 		}
 	}
 	return false
 }
 
-// calculate the cooling off period.
+// UpdateRetryTime calculate the cooling off period.
 func (rl *RateLimiter) UpdateRetryTime(currentCount uint64, lastWindowCount uint64, lastWindowWeight float64) {
 	interval := rl.Interval.Seconds()
 	var coolingOff uint64
 	if currentCount > rl.Limit {
 		coolingOff = uint64(interval)
 	} else if float64(currentCount)+float64(lastWindowCount)*lastWindowWeight > float64(rl.Limit) {
-		// use the percentage of required count from last window to calculate required time from last window.
-		coolingOffRatio := float64(rl.Limit) - float64(currentCount)/float64(lastWindowCount)
-		coolingOff = uint64(coolingOffRatio * interval)
+		// TODO: shall be able to come out an dynamic number to represent the real cooling off time
+		coolingOff = uint64(interval)
 	}
 	atomic.SwapUint64(&rl.retryTime, coolingOff)
 }
 
-// now/seconds - math.Floor(now/seconds) will get the percentage of current window.
+// GetLastWindowWeight now/seconds - math.Floor(now/seconds) will get the percentage of current window.
 // e.g. if interval is 60 secs, current time is 01:00:06, then current percentage shall be 10%
 // last window weight shall be 90%
 func (rl *RateLimiter) GetLastWindowWeight() float64 {
@@ -198,12 +200,13 @@ func (rl *RateLimiter) Init() error {
 	return nil
 }
 
-// http handler to take care of too many api request.
+// MiddleWareHandler http handler to take care of too many api request.
 func (rl *RateLimiter) MiddleWareHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rl.Increment()
 		if rl.IsOverLimit() {
-			w.Write([]byte(fmt.Sprintf("Api call limit of %d per %f seconds reached, please wait for %d seconds", rl.Limit, uint64(rl.Interval.Seconds()), rl.retryTime)))
-			http.Error(w, http.StatusText(http.StatusTooManyRequests), http.StatusTooManyRequests)
+			errMessage := fmt.Sprintf("Api call limit of %d per %d seconds reached, please wait for %d seconds", rl.Limit, uint64(rl.Interval.Seconds()), rl.retryTime)
+			http.Error(w, errMessage, http.StatusTooManyRequests)
 			return
 		}
 		next.ServeHTTP(w, r)
