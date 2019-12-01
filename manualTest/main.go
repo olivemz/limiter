@@ -25,7 +25,7 @@ func main() {
 	}
 	mux := http.NewServeMux()
 
-	rl := limiter.New(redisPool, "requests", 5, time.Minute, 2*time.Second)
+	rl := limiter.New(redisPool, "requests", 23, time.Minute, 2*time.Second)
 	rlErr := rl.Init()
 
 	if rlErr != nil {

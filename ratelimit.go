@@ -14,6 +14,7 @@ import (
 	"github.com/gomodule/redigo/redis"
 )
 
+// RateLimiter struct
 type RateLimiter struct {
 	RedisPool *redis.Pool
 
@@ -33,6 +34,7 @@ type RateLimiter struct {
 	stopTicker chan bool
 }
 
+// New new ratelimit
 func New(redisPool *redis.Pool, baseKey string, limit uint64, interval time.Duration, flushInterval time.Duration) *RateLimiter {
 	rl := &RateLimiter{
 		RedisPool: redisPool,
@@ -125,13 +127,12 @@ func (rl *RateLimiter) UpdateLastWindowCount() {
 }
 
 // IsOverLimit checks if we are over the limit we have set
-func (rl *RateLimiter) IsOverLimit() bool {
+func (rl *RateLimiter) IsOverLimit(lastWindowWeight float64) bool {
 	var currentCount uint64
 	if currentCount = rl.syncedCount + rl.currentCount; currentCount > rl.Limit+1 {
 		currentCount = rl.Limit + 1
 	}
 	if rl.lastWindowCount != 0 {
-		lastWindowWeight := rl.GetLastWindowWeight()
 		if float64(rl.lastWindowCount)*lastWindowWeight+float64(currentCount) > float64(rl.Limit) {
 			rl.UpdateRetryTime(currentCount, rl.lastWindowCount, lastWindowWeight)
 			return true
@@ -204,7 +205,8 @@ func (rl *RateLimiter) Init() error {
 func (rl *RateLimiter) MiddleWareHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rl.Increment()
-		if rl.IsOverLimit() {
+		lastWindowWeight := rl.GetLastWindowWeight()
+		if rl.IsOverLimit(lastWindowWeight) {
 			errMessage := fmt.Sprintf("Api call limit of %d per %d seconds reached, please wait for %d seconds", rl.Limit, uint64(rl.Interval.Seconds()), rl.retryTime)
 			http.Error(w, errMessage, http.StatusTooManyRequests)
 			return
